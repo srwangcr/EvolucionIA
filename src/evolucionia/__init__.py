@@ -1,3 +1,4 @@
+# __init__.py - CORREGIDO
 """EvolucionIA package."""
 
 __all__ = ["__version__"]

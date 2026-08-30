@@ -1,431 +1,382 @@
+"""
+Dashboard Streamlit para EvolucionIA con soporte M2/M3.
+"""
+
 from __future__ import annotations
 
-import os
+import sys
+from pathlib import Path
 
+# Agregar src al path para importaciones absolutas
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+
+import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
-import streamlit as st
+from plotly.subplots import make_subplots
+import time
 
-from .config import Settings
-from .database import (
-    build_engine,
-    init_db,
-    load_agent_snapshots,
-    load_market_snapshots,
-    load_simulation_runs,
-    load_transactions,
-    session_factory,
-)
-from .simulation import SimulationEngine
+from evolucionia.config import Settings, load_settings
+from evolucionia.database import build_engine, init_db, session_factory
+from evolucionia.simulation import SimulationEngine
 
-
-st.set_page_config(page_title="EvolucionIA", layout="wide", page_icon="📈")
-
-st.markdown(
-    """
-<style>
-    :root {
-        --bg: #0b1020;
-        --panel: rgba(16, 24, 48, 0.88);
-        --panel-border: rgba(120, 160, 255, 0.18);
-        --text: #e8eefc;
-        --muted: #97a3c6;
-        --accent: #6ee7b7;
-        --accent-2: #7dd3fc;
-    }
-    .stApp {
-        background:
-            radial-gradient(circle at top left, rgba(125, 211, 252, 0.18), transparent 28%),
-            radial-gradient(circle at top right, rgba(110, 231, 183, 0.16), transparent 26%),
-            linear-gradient(180deg, #07111f 0%, #0b1020 42%, #0f172a 100%);
-        color: var(--text);
-    }
-    section[data-testid="stSidebar"] {
-        background: rgba(7, 15, 31, 0.96);
-        border-right: 1px solid rgba(148, 163, 184, 0.14);
-    }
-    .hero {
-        padding: 1.2rem 1.25rem 0.35rem 1.25rem;
-        border-radius: 24px;
-        background: linear-gradient(135deg, rgba(59, 130, 246, 0.18), rgba(16, 185, 129, 0.12));
-        border: 1px solid rgba(148, 163, 184, 0.16);
-        box-shadow: 0 24px 80px rgba(0, 0, 0, 0.28);
-        margin-bottom: 1rem;
-    }
-    .hero h1 {
-        margin: 0;
-        color: var(--text);
-        font-size: 2.3rem;
-        letter-spacing: -0.04em;
-    }
-    .hero p {
-        margin: 0.35rem 0 0 0;
-        color: var(--muted);
-    }
-    .metric-card {
-        background: var(--panel);
-        border: 1px solid var(--panel-border);
-        border-radius: 18px;
-        padding: 1rem 1.1rem;
-        box-shadow: 0 16px 40px rgba(0, 0, 0, 0.22);
-    }
-    .explanation {
-        background: rgba(15, 23, 42, 0.72);
-        border: 1px solid rgba(148, 163, 184, 0.16);
-        border-radius: 16px;
-        padding: 0.85rem 0.95rem;
-        color: var(--muted);
-        line-height: 1.45;
-        margin-bottom: 0.75rem;
-    }
-</style>
-""",
-    unsafe_allow_html=True,
-)
+try:
+    from evolucionia.rust_engine import RustSimulationEngine, RUST_AVAILABLE
+except ImportError:
+    RUST_AVAILABLE = False
+    RustSimulationEngine = None
 
 
-@st.cache_resource
-def get_engine(database_url: str, initialize: bool = False):
-    engine = build_engine(database_url)
-    if initialize:
-        init_db(engine)
-    return engine
-
-
-@st.cache_data(show_spinner=False)
-def load_simulation_runs_cached(database_url: str) -> pd.DataFrame:
-    return load_simulation_runs(get_engine(database_url, initialize=False))
-
-
-@st.cache_data(show_spinner=False)
-def load_market_snapshots_cached(database_url: str, run_id: str) -> pd.DataFrame:
-    return load_market_snapshots(get_engine(database_url, initialize=False), run_id)
-
-
-@st.cache_data(show_spinner=False)
-def load_agent_snapshots_cached(database_url: str, run_id: str) -> pd.DataFrame:
-    return load_agent_snapshots(get_engine(database_url, initialize=False), run_id)
-
-
-@st.cache_data(show_spinner=False)
-def load_transactions_cached(database_url: str, run_id: str) -> pd.DataFrame:
-    return load_transactions(get_engine(database_url, initialize=False), run_id)
-
-
-def run_simulation(engine, settings: Settings) -> dict:
+def run_simulation(settings, engine_type: str = "python"):
+    """Ejecuta simulación con el motor seleccionado."""
+    engine = build_engine(settings.database_url)
+    init_db(engine)
     session = session_factory(engine)()
+    
     try:
-        simulation = SimulationEngine(settings, session)
-        simulation.run(settings.ticks)
-        return simulation.summary()
+        if engine_type == "rust" and RUST_AVAILABLE and RustSimulationEngine:
+            st.info("⚡ Usando motor Rust (M3) - ultra rápido")
+            sim = RustSimulationEngine(settings, session)
+        else:
+            st.info("🐍 Usando motor Python (M2)")
+            sim = SimulationEngine(settings, session)
+        
+        start_time = time.perf_counter()
+        results = sim.run(settings.ticks)
+        elapsed = time.perf_counter() - start_time
+        
+        summary = sim.summary()
+        summary["elapsed"] = elapsed
+        summary["engine"] = engine_type
+        
+        return summary, results
     finally:
         session.close()
 
 
-def make_candlestick(market_df: pd.DataFrame, max_tick: int | None = None):
-    if market_df.empty:
-        return None
-    view = market_df if max_tick is None else market_df[market_df["tick"] <= max_tick]
-    if view.empty:
-        return None
-    fig = go.Figure(
-        data=[
-            go.Candlestick(
-                x=view["tick"],
-                open=view["open_price"],
-                high=view["high_price"],
-                low=view["low_price"],
-                close=view["close_price"],
-                name="Precio",
-                increasing_line_color="#34d399",
-                decreasing_line_color="#fb7185",
-            )
-        ]
-    )
+def plot_candlesticks(market_df: pd.DataFrame, current_tick: int | None = None):
+    """Grafica velas OHLC con línea vertical en el tick actual."""
+    fig = go.Figure(data=[
+        go.Candlestick(
+            x=market_df["tick"],
+            open=market_df["open_price"],
+            high=market_df["high_price"],
+            low=market_df["low_price"],
+            close=market_df["close_price"],
+            name="OHLC"
+        )
+    ])
+    
+    if current_tick is not None and current_tick in market_df["tick"].values:
+        fig.add_vline(
+            x=current_tick,
+            line_dash="dash",
+            line_color="yellow",
+            line_width=2,
+            annotation_text=f"Tick {current_tick}",
+            annotation_position="top right"
+        )
+    
     fig.update_layout(
-        margin=dict(l=12, r=12, t=24, b=12),
-        height=420,
-        paper_bgcolor="rgba(0,0,0,0)",
-        plot_bgcolor="rgba(0,0,0,0)",
-        font=dict(color="#e8eefc"),
+        title="📊 Mercado - Velas",
+        xaxis_title="Tick",
+        yaxis_title="Precio",
+        height=400,
+        template="plotly_dark",
+        xaxis=dict(range=[market_df["tick"].min(), market_df["tick"].max()])
     )
     return fig
 
 
-def make_price_line(market_df: pd.DataFrame, max_tick: int | None = None):
-    if market_df.empty:
-        return None
-    view = market_df if max_tick is None else market_df[market_df["tick"] <= max_tick]
-    if view.empty:
-        return None
+def plot_price_shock(market_df: pd.DataFrame, current_tick: int | None = None):
+    """Grafica precio y shock con línea vertical en el tick actual."""
+    fig = make_subplots(specs=[[{"secondary_y": True}]])
+    
+    fig.add_trace(
+        go.Scatter(
+            x=market_df["tick"],
+            y=market_df["close_price"],
+            name="Precio",
+            line=dict(color="#00ff88")
+        ),
+        secondary_y=False,
+    )
+    
+    fig.add_trace(
+        go.Scatter(
+            x=market_df["tick"],
+            y=market_df["shock_factor"],
+            name="Shock",
+            line=dict(color="#ff6b6b", dash="dot")
+        ),
+        secondary_y=True,
+    )
+    
+    if current_tick is not None and current_tick in market_df["tick"].values:
+        fig.add_vline(
+            x=current_tick,
+            line_dash="dash",
+            line_color="white",
+            line_width=1.5,
+        )
+    
+    fig.update_layout(
+        title="📈 Precio vs Shock",
+        xaxis_title="Tick",
+        height=300,
+        template="plotly_dark",
+        xaxis=dict(range=[market_df["tick"].min(), market_df["tick"].max()])
+    )
+    fig.update_yaxes(title_text="Precio", secondary_y=False)
+    fig.update_yaxes(title_text="Shock", secondary_y=True)
+    return fig
+
+
+def plot_wealth_distribution(agent_df: pd.DataFrame, tick: int | None = None, price: float = 8.0):
+    """Grafica distribución de riqueza."""
+    if agent_df.empty:
+        fig = go.Figure()
+        fig.update_layout(title="💰 Distribución de Riqueza - Sin datos", height=300, template="plotly_dark")
+        return fig
+    
+    if tick is not None:
+        agent_df = agent_df[agent_df["tick"] == tick]
+    
+    if "alive" in agent_df.columns:
+        alive = agent_df.loc[agent_df["alive"] == True]
+    else:
+        alive = agent_df
+    
+    if alive.empty:
+        fig = go.Figure()
+        fig.update_layout(title=f"💰 Distribución de Riqueza - Tick {tick} (sin vivos)", height=300, template="plotly_dark")
+        return fig
+    
+    wealth = alive["balance"] + alive["inventory"] * price
+    
+    fig = go.Figure(data=[
+        go.Histogram(x=wealth, nbinsx=20, marker_color="#ffd93d", name="Riqueza")
+    ])
+    
+    fig.update_layout(
+        title=f"💰 Distribución de Riqueza - Tick {tick}",
+        xaxis_title="Riqueza",
+        yaxis_title="Frecuencia",
+        height=300,
+        template="plotly_dark",
+    )
+    return fig
+
+
+def plot_survival(agent_df: pd.DataFrame, current_tick: int | None = None):
+    """Grafica supervivencia por especie con línea vertical en el tick actual."""
+    if agent_df.empty:
+        fig = go.Figure()
+        fig.update_layout(title="🧬 Supervivencia por Especie - Sin datos", height=300, template="plotly_dark")
+        return fig
+    
+    if "tick" not in agent_df.columns or "species" not in agent_df.columns or "alive" not in agent_df.columns:
+        fig = go.Figure()
+        fig.update_layout(title="🧬 Supervivencia por Especie - Datos incompletos", height=300, template="plotly_dark")
+        return fig
+    
+    survival = agent_df.groupby(["tick", "species"])["alive"].mean().reset_index()
+    species_names = {"miner": "⛏️ Mineros", "speculator": "📈 Especuladores", "consumer": "🛒 Consumidores"}
+    
     fig = go.Figure()
-    fig.add_trace(
-        go.Scatter(
-            x=view["tick"],
-            y=view["close_price"],
-            mode="lines",
-            name="Cierre",
-            line=dict(color="#7dd3fc", width=2.5),
-        )
-    )
-    fig.add_trace(
-        go.Scatter(
-            x=view["tick"],
-            y=view["shock_factor"],
-            mode="lines",
-            name="Shock macro",
-            line=dict(color="#fbbf24", width=1.8, dash="dot"),
-            yaxis="y2",
-        )
-    )
-    if max_tick is not None:
-        fig.add_vline(x=max_tick, line_dash="dash", line_color="#a78bfa")
+    for species in ["miner", "speculator", "consumer"]:
+        data = survival[survival["species"] == species]
+        if not data.empty:
+            fig.add_trace(go.Scatter(
+                x=data["tick"],
+                y=data["alive"] * 100,
+                name=species_names.get(species, species),
+                mode="lines+markers",
+            ))
+    
+    if current_tick is not None:
+        fig.add_vline(x=current_tick, line_dash="dash", line_color="white", line_width=1.5)
+    
     fig.update_layout(
-        margin=dict(l=12, r=12, t=24, b=12),
-        height=340,
-        paper_bgcolor="rgba(0,0,0,0)",
-        plot_bgcolor="rgba(0,0,0,0)",
-        font=dict(color="#e8eefc"),
-        yaxis=dict(title="Precio"),
-        yaxis2=dict(title="Shock", overlaying="y", side="right", showgrid=False),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        title="🧬 Supervivencia por Especie",
+        xaxis_title="Tick",
+        yaxis_title="% Vivos",
+        height=300,
+        template="plotly_dark",
     )
     return fig
-
-
-def format_run_label(row: pd.Series | dict) -> str:
-    timestamp = row.get("created_at")
-    if pd.isna(timestamp):
-        timestamp_text = "sin fecha"
-    else:
-        timestamp_text = pd.to_datetime(timestamp).strftime("%Y-%m-%d %H:%M")
-    price = row.get("final_price")
-    status = row.get("status", "unknown")
-    return f"{timestamp_text} · {status} · cierre {price:.2f}" if pd.notna(price) else f"{timestamp_text} · {status}"
-
-
-def render_metrics(market_df: pd.DataFrame, transaction_df: pd.DataFrame, agent_df: pd.DataFrame, run_row: pd.Series | None, current_tick: int):
-    visible_market = market_df if current_tick <= 0 else market_df[market_df["tick"] <= current_tick]
-    visible_transactions = transaction_df if current_tick <= 0 else transaction_df[transaction_df["tick"] <= current_tick]
-    visible_agents = agent_df if current_tick <= 0 else agent_df[agent_df["tick"] <= current_tick]
-
-    final_price = float(visible_market["close_price"].iloc[-1]) if not visible_market.empty else 0.0
-    if not visible_agents.empty:
-        latest_tick = visible_agents["tick"].max()
-        active_agents = int(visible_agents[visible_agents["tick"] == latest_tick]["agent_id"].nunique())
-    else:
-        active_agents = 0
-    total_transactions = int(len(visible_transactions))
-    if run_row is not None and pd.notna(run_row.get("mean_wealth")) and current_tick <= 0:
-        mean_wealth = float(run_row.get("mean_wealth"))
-    elif not visible_agents.empty:
-        latest_tick = visible_agents["tick"].max()
-        latest_agents = visible_agents[visible_agents["tick"] == latest_tick].copy()
-        latest_agents["wealth"] = latest_agents["balance"] + latest_agents["inventory"] * final_price
-        mean_wealth = float(latest_agents["wealth"].mean())
-    else:
-        mean_wealth = 0.0
-
-    columns = st.columns(4)
-    cards = [
-        ("Precio visible", f"{final_price:.2f}"),
-        ("Transacciones visibles", f"{total_transactions}"),
-        ("Agentes activos", f"{active_agents}"),
-        ("Riqueza media", f"{mean_wealth:.2f}"),
-    ]
-    for column, (label, value) in zip(columns, cards):
-        with column:
-            st.markdown(
-                f"<div class='metric-card'><div style='font-size:0.9rem;color:#97a3c6'>{label}</div><div style='font-size:1.9rem;font-weight:700;color:#f8fafc'>{value}</div></div>",
-                unsafe_allow_html=True,
-            )
-
-
-def current_state_story(market_df: pd.DataFrame, agent_df: pd.DataFrame, transaction_df: pd.DataFrame, tick: int) -> str:
-    if tick <= 0 or market_df.empty:
-        return "Elegí una corrida y mové el control de reproducción para ver cómo cambia el mercado tick por tick."
-
-    visible_market = market_df[market_df["tick"] <= tick]
-    visible_agents = agent_df[agent_df["tick"] <= tick]
-    visible_transactions = transaction_df[transaction_df["tick"] <= tick]
-    current_row = visible_market.iloc[-1]
-    current_agents = visible_agents[visible_agents["tick"] == visible_agents["tick"].max()]
-    survivors = int(current_agents["alive"].sum()) if not current_agents.empty else 0
-
-    return (
-        f"Tick {tick}: el precio de cierre está en {current_row['close_price']:.2f}, "
-        f"con {int(current_row['buyers_count'])} compradores y {int(current_row['sellers_count'])} vendedores. "
-        f"Se observan {len(visible_transactions)} transacciones acumuladas y {survivors} agentes vivos en el último snapshot visible."
-    )
 
 
 def main():
-    st.markdown(
-        """
-        <div class="hero">
-            <h1>EvolucionIA</h1>
-            <p>Mercado de agentes con evolución genética, ledger transaccional y reproducción de la simulación paso a paso.</p>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-    database_url = st.sidebar.text_input("DATABASE_URL", os.getenv("DATABASE_URL", "sqlite:///evolucionia_runs.db"))
-    read_database_url = st.sidebar.text_input(
-        "READ_DATABASE_URL",
-        os.getenv("READ_DATABASE_URL", database_url),
-        help="Opcional: URL de replica de lectura para consultas del dashboard.",
-    )
-    initial_agents = st.sidebar.slider("Agentes iniciales", 15, 250, 60, 5)
-    ticks = st.sidebar.slider("Ticks", 20, 240, 120, 10)
-    initial_price = st.sidebar.slider("Precio inicial", 1.0, 50.0, 10.0, 0.5)
-    seed = st.sidebar.number_input("Seed", value=42, step=1)
-
-    settings = Settings(
-        database_url=database_url,
-        read_database_url=read_database_url,
-        initial_agents=initial_agents,
-        ticks=ticks,
-        generation_length=30,
-        initial_price=initial_price,
-        seed=int(seed),
-    )
-
-    write_engine = get_engine(database_url, initialize=True)
-
-    if st.sidebar.button("Ejecutar simulacion", use_container_width=True):
-        with st.spinner("Corriendo simulacion..."):
-            summary = run_simulation(write_engine, settings)
-        st.cache_data.clear()
-        st.session_state["selected_run_id"] = summary["run_id"]
-        st.toast("Simulacion completada", icon="✅")
-        st.rerun()
-
-    runs_df = load_simulation_runs_cached(read_database_url)
-    if runs_df.empty and read_database_url != database_url:
-        st.warning("La replica de lectura no devolvio corridas. Mostrando datos desde la base primaria.")
-        runs_df = load_simulation_runs_cached(database_url)
-    if runs_df.empty:
-        st.info("Todavia no hay corridas almacenadas. Ejecuta una simulacion desde la barra lateral.")
-        return
-
-    run_options = runs_df["run_id"].tolist()
-    labels = {row["run_id"]: format_run_label(row) for row in runs_df.to_dict("records")}
-    default_run_id = st.session_state.get("selected_run_id", run_options[0])
-    if default_run_id not in run_options:
-        default_run_id = run_options[0]
-
-    selected_run_id = st.selectbox(
-        "Corrida",
-        options=run_options,
-        index=run_options.index(default_run_id),
-        format_func=lambda value: labels.get(value, value),
-    )
-    st.session_state["selected_run_id"] = selected_run_id
-
-    run_row = runs_df[runs_df["run_id"] == selected_run_id].iloc[0]
-    market_df = load_market_snapshots_cached(read_database_url, selected_run_id)
-    agent_df = load_agent_snapshots_cached(read_database_url, selected_run_id)
-    transaction_df = load_transactions_cached(read_database_url, selected_run_id)
-    if read_database_url != database_url and market_df.empty:
-        market_df = load_market_snapshots_cached(database_url, selected_run_id)
-        agent_df = load_agent_snapshots_cached(database_url, selected_run_id)
-        transaction_df = load_transactions_cached(database_url, selected_run_id)
-
-    species_options = sorted(agent_df["species"].dropna().astype(str).unique().tolist()) if not agent_df.empty else []
-    selected_species = st.multiselect(
-        "Tipo de agente",
-        options=species_options,
-        default=species_options,
-        help="Filtra snapshots y transacciones donde participa al menos un agente del tipo seleccionado.",
-    )
-    if species_options and selected_species and len(selected_species) < len(species_options):
-        agent_df = agent_df[agent_df["species"].isin(selected_species)].copy()
-        allowed_agent_ids = set(agent_df["agent_id"].astype(int).unique().tolist())
-        transaction_df = transaction_df[
-            transaction_df["buyer_id"].isin(allowed_agent_ids)
-            | transaction_df["seller_id"].isin(allowed_agent_ids)
-        ].copy()
-
-    max_tick = int(market_df["tick"].max()) if not market_df.empty else 0
-    replay_mode = st.toggle("Reproducción guiada", value=True)
-    current_tick = max_tick
-    if replay_mode and max_tick > 0:
-        current_tick = st.slider("Tick visible", 1, max_tick, min(max_tick, max(1, st.session_state.get("dashboard_tick", 1))))
-        st.session_state["dashboard_tick"] = current_tick
-    else:
-        st.session_state["dashboard_tick"] = max_tick
-
-    render_metrics(market_df, transaction_df, agent_df, run_row, current_tick)
-
-    st.markdown(
-        f"<div class='explanation'><strong>Qué estás viendo:</strong> {current_state_story(market_df, agent_df, transaction_df, current_tick)}</div>",
-        unsafe_allow_html=True,
-    )
-
-    col_left, col_right = st.columns([1.35, 1])
-    with col_left:
-        fig = make_candlestick(market_df, current_tick if replay_mode else None)
-        st.plotly_chart(fig, use_container_width=True)
-        st.caption("Este gráfico muestra la evolución del precio por tick. Las velas resumen apertura, máximo, mínimo y cierre para ver volatilidad y shocks macro.")
-
-    with col_right:
-        line_fig = make_price_line(market_df, current_tick if replay_mode else None)
-        st.plotly_chart(line_fig, use_container_width=True)
-        st.caption("La línea azul es el precio de cierre. La línea punteada amarilla marca el shock macroeconómico aplicado en cada tick.")
-
-    lower_left, lower_right = st.columns(2)
-    if not agent_df.empty:
-        visible_agents = agent_df if current_tick <= 0 else agent_df[agent_df["tick"] <= current_tick]
-        latest_tick = visible_agents["tick"].max()
-        latest_agents = visible_agents[visible_agents["tick"] == latest_tick].copy()
-        final_price = float(market_df[market_df["tick"] <= current_tick]["close_price"].iloc[-1]) if not market_df.empty else 0.0
-        latest_agents["wealth"] = latest_agents["balance"] + latest_agents["inventory"] * final_price
-
-        with lower_left:
-            wealth_fig = go.Figure(data=[go.Histogram(x=latest_agents["wealth"], nbinsx=18, marker_color="#7dd3fc")])
-            wealth_fig.update_layout(
-                title="Distribucion de riqueza",
-                margin=dict(l=12, r=12, t=40, b=12),
-                height=360,
-                paper_bgcolor="rgba(0,0,0,0)",
-                plot_bgcolor="rgba(0,0,0,0)",
-                font=dict(color="#e8eefc"),
+    st.set_page_config(page_title="EvolucionIA Dashboard", page_icon="🧬", layout="wide")
+    
+    st.title("🧬 EvolucionIA - Dashboard")
+    st.caption("Simulación de mercado con agentes heterogéneos")
+    
+    # SIDEBAR
+    with st.sidebar:
+        st.header("⚙️ Configuración")
+        base_settings = load_settings()
+        
+        engine_options = ["python"]
+        if RUST_AVAILABLE:
+            engine_options.append("rust")
+        
+        engine_type = st.selectbox(
+            "Motor de simulación",
+            engine_options,
+            format_func=lambda x: "🐍 Python (M2)" if x == "python" else "⚡ Rust (M3) - 10x más rápido",
+        )
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            ticks = st.number_input("Ticks", min_value=10, max_value=500, value=120, step=10)
+            agents = st.number_input("Agentes", min_value=10, max_value=2000, value=200, step=10)
+        with col2:
+            seed = st.number_input("Semilla", min_value=0, max_value=9999, value=42, step=1)
+            initial_price = st.number_input("Precio inicial", min_value=1.0, max_value=100.0, value=10.0, step=0.5)
+        
+        if st.button("🚀 Ejecutar simulación", type="primary", use_container_width=True):
+            st.session_state.run_clicked = True
+            st.session_state.ticks = ticks
+            st.session_state.agents = agents
+            st.session_state.seed = seed
+            st.session_state.initial_price = initial_price
+            st.session_state.engine_type = engine_type
+            st.session_state.selected_tick = None
+            st.session_state.current_run_id = None
+    
+    # EJECUTAR SIMULACIÓN
+    if st.session_state.get("run_clicked", False):
+        with st.spinner("Ejecutando simulación..."):
+            settings = Settings(
+                database_url=base_settings.database_url,
+                read_database_url=base_settings.read_database_url,
+                initial_agents=st.session_state.agents,
+                ticks=st.session_state.ticks,
+                generation_length=base_settings.generation_length,
+                initial_price=st.session_state.initial_price,
+                seed=st.session_state.seed,
+                resource_name=base_settings.resource_name,
+                compute_backend=base_settings.compute_backend,
+                compute_workers=base_settings.compute_workers,
+                output_dir=base_settings.output_dir,
             )
-            st.plotly_chart(wealth_fig, use_container_width=True)
-            st.caption("El histograma compara la riqueza actual de los agentes visibles. Sirve para detectar concentración, desigualdad o posibles monopolios.")
-
-        with lower_right:
-            survival_df = latest_agents.groupby("species", as_index=False)["alive"].mean()
-            survival_fig = go.Figure(data=[go.Bar(x=survival_df["species"], y=survival_df["alive"], marker_color="#34d399")])
-            survival_fig.update_layout(
-                title="Supervivencia por especie",
-                yaxis_title="Proporcion viva",
-                margin=dict(l=12, r=12, t=40, b=12),
-                height=360,
-                paper_bgcolor="rgba(0,0,0,0)",
-                plot_bgcolor="rgba(0,0,0,0)",
-                font=dict(color="#e8eefc"),
+            
+            summary, results = run_simulation(settings, st.session_state.engine_type)
+            
+            st.session_state.current_summary = summary
+            st.session_state.current_run_id = summary["run_id"]
+            st.session_state.settings = settings
+            
+        st.session_state.run_clicked = False
+    
+    # MOSTRAR RESULTADOS
+    if st.session_state.get("current_run_id"):
+        summary = st.session_state.current_summary
+        settings = st.session_state.settings
+        
+        engine_db = build_engine(settings.database_url)
+        
+        market_df = pd.read_sql(
+            "SELECT * FROM market_snapshots WHERE run_id = ? ORDER BY tick",
+            engine_db,
+            params=(summary["run_id"],)
+        )
+        agent_df = pd.read_sql(
+            "SELECT * FROM agent_snapshots WHERE run_id = ? ORDER BY tick, agent_id",
+            engine_db,
+            params=(summary["run_id"],)
+        )
+        
+        # Métricas
+        col1, col2, col3, col4, col5 = st.columns(5)
+        with col1:
+            st.metric("🏦 Precio final", f"{summary['final_price']:.4f}")
+        with col2:
+            st.metric("🧬 Vivos", f"{summary['alive']}/{summary['agents']}")
+        with col3:
+            st.metric("💰 Riqueza media", f"{summary['mean_wealth']:.2f}")
+        with col4:
+            st.metric("📊 Transacciones", summary['transactions'])
+        with col5:
+            engine_label = "⚡ Rust" if summary.get("engine") == "rust" else "🐍 Python"
+            st.metric("⏱️ Tiempo", f"{summary['elapsed']:.3f}s", engine_label)
+        
+        # Slider
+        if not market_df.empty:
+            max_tick = market_df["tick"].max()
+            
+            if st.session_state.get("selected_tick") is None:
+                st.session_state.selected_tick = max_tick
+            
+            selected_tick = st.slider(
+                "🎯 Tick actual",
+                min_value=1,
+                max_value=max_tick,
+                value=st.session_state.selected_tick,
+                step=1,
+                key="tick_slider"
             )
-            st.plotly_chart(survival_fig, use_container_width=True)
-            st.caption("Esta barra resume qué porcentaje de cada especie sigue vivo en el tick seleccionado. Es útil para ver selección natural y adaptación.")
-
-    st.subheader("Ultimas transacciones")
-    export_df = transaction_df if current_tick <= 0 else transaction_df[transaction_df["tick"] <= current_tick]
-    st.download_button(
-        "Exportar CSV",
-        data=export_df.to_csv(index=False).encode("utf-8"),
-        file_name=f"transactions_{selected_run_id}.csv",
-        mime="text/csv",
-        use_container_width=False,
-    )
-    st.dataframe(export_df.tail(20), use_container_width=True, hide_index=True)
-    st.caption("Cada fila representa una transacción individual del ledger. Es la fuente para auditar el mercado y reconstruir el historial completo.")
-
-    st.subheader("Historico de corridas")
-    history_view = runs_df[["created_at", "status", "seed", "ticks", "initial_agents", "final_price", "total_transactions", "mean_wealth"]].copy()
-    st.dataframe(history_view, use_container_width=True, hide_index=True)
-    st.caption("Usá este historial para comparar corridas con parámetros distintos y evaluar cómo cambian precio, transacciones y riqueza media.")
+            st.session_state.selected_tick = selected_tick
+            
+            tick_data = market_df[market_df["tick"] == selected_tick]
+            if not tick_data.empty:
+                row = tick_data.iloc[0]
+                st.caption(f"📊 Tick {selected_tick}: Open={row['open_price']:.4f}, High={row['high_price']:.4f}, Low={row['low_price']:.4f}, Close={row['close_price']:.4f}")
+        
+        # Gráficos
+        st.subheader("📊 Visualizaciones")
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            st.plotly_chart(plot_candlesticks(market_df, st.session_state.selected_tick), use_container_width=True)
+        with col2:
+            st.plotly_chart(plot_price_shock(market_df, st.session_state.selected_tick), use_container_width=True)
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            if not market_df.empty:
+                st.plotly_chart(
+                    plot_wealth_distribution(agent_df, st.session_state.selected_tick, summary['final_price']),
+                    use_container_width=True
+                )
+            else:
+                st.info("No hay datos de mercado para mostrar")
+        with col2:
+            st.plotly_chart(plot_survival(agent_df, st.session_state.selected_tick), use_container_width=True)
+        
+        # 📋 LEDGER DE TRANSACCIONES - MEJORADO
+        with st.expander("📋 Ledger de transacciones", expanded=True):
+            tx_df = pd.read_sql(
+                "SELECT * FROM transactions WHERE run_id = ? ORDER BY tick",
+                engine_db,
+                params=(summary["run_id"],)
+            )
+            
+            if not tx_df.empty:
+                total_tx = len(tx_df)
+                st.write(f"**📊 Total transacciones en la corrida:** {total_tx}")
+                
+                # Mostrar distribución de transacciones por tick
+                tx_dist = tx_df.groupby("tick").size().reset_index(name="count")
+                st.write("**📈 Distribución de transacciones por tick:**")
+                st.bar_chart(tx_dist.set_index("tick"))
+                
+                # Transacciones del tick seleccionado
+                if st.session_state.selected_tick is not None:
+                    tx_filtered = tx_df[tx_df["tick"] == st.session_state.selected_tick]
+                    if not tx_filtered.empty:
+                        st.write(f"**✅ Transacciones en el tick {st.session_state.selected_tick}:** {len(tx_filtered)}")
+                        st.dataframe(tx_filtered, use_container_width=True)
+                    else:
+                        st.info(f"ℹ️ No hay transacciones en el tick {st.session_state.selected_tick}.")
+                        st.write("**📋 Muestra de transacciones (otros ticks):**")
+                        st.dataframe(tx_df.head(10), use_container_width=True)
+                else:
+                    st.dataframe(tx_df, use_container_width=True)
+            else:
+                st.info("No hay transacciones en esta corrida")
 
 
 if __name__ == "__main__":

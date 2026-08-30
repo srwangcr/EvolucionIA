@@ -5,7 +5,6 @@ import json
 
 from .config import Settings, load_settings
 from .database import build_engine, init_db, load_latest_run_id, load_market_snapshots, session_factory
-from .simulation import SimulationEngine
 from .validation import compare_market_series, load_reference_dataset, membership_adjustment_recommendations
 
 
@@ -21,12 +20,35 @@ def _build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--initial-price", type=float, default=None)
     run_parser.add_argument("--compute-backend", choices=["serial", "process"], default=None)
     run_parser.add_argument("--compute-workers", type=int, default=None)
+    run_parser.add_argument("--engine", choices=["python", "rust"], default="python",
+                            help="Simulation engine: python (default) or rust")
 
     backtest_parser = subparsers.add_parser("backtest", help="Validate simulation outputs against a real market dataset")
     backtest_parser.add_argument("--dataset", type=str, required=True, help="CSV path with real market prices")
     backtest_parser.add_argument("--run-id", type=str, default=None, help="Simulation run_id to validate (latest by default)")
     backtest_parser.add_argument("--database-url", type=str, default=None)
     backtest_parser.add_argument("--output-json", type=str, default=None, help="Optional path to write metrics as JSON")
+
+    calibrate_parser = subparsers.add_parser(
+        "calibrate",
+        help="Calibrate simulation parameters against real market data using Optuna"
+    )
+    calibrate_parser.add_argument(
+        "--dataset", type=str, required=True,
+        help="CSV path with real market prices for calibration"
+    )
+    calibrate_parser.add_argument(
+        "--trials", type=int, default=100,
+        help="Number of Optuna trials (default: 100)"
+    )
+    calibrate_parser.add_argument(
+        "--study-name", type=str, default="evolucionia_calibration",
+        help="Optuna study name"
+    )
+    calibrate_parser.add_argument(
+        "--output", type=str, default=None,
+        help="JSON file to export best parameters"
+    )
     return parser
 
 
@@ -52,8 +74,23 @@ def run_simulation(args: argparse.Namespace) -> dict:
     engine = build_engine(settings.database_url)
     init_db(engine)
     session = session_factory(engine)()
+
     try:
-        simulation = SimulationEngine(settings, session)
+        if args.engine == "rust":
+            try:
+                from .rust_engine import RustSimulationEngine
+                simulation = RustSimulationEngine(settings, session)
+                print("⚡ Usando motor Rust (M3)")
+            except (ImportError, RuntimeError) as e:
+                print(f"⚠️ Motor Rust no disponible: {e}")
+                print("🐍 Usando motor Python (M2)")
+                from .simulation import SimulationEngine
+                simulation = SimulationEngine(settings, session)
+        else:
+            from .simulation import SimulationEngine
+            simulation = SimulationEngine(settings, session)
+            print("🐍 Usando motor Python (M2)")
+
         simulation.run(settings.ticks)
         return simulation.summary()
     finally:
@@ -103,12 +140,16 @@ def main() -> None:
 
     if args.command == "run":
         summary = run_simulation(args)
+        print("\n" + "=" * 50)
         print("Simulation complete")
+        print("=" * 50)
         for key, value in summary.items():
             print(f"{key}: {value}")
     elif args.command == "backtest":
         report = run_backtest(args)
+        print("\n" + "=" * 50)
         print("Backtesting complete")
+        print("=" * 50)
         print(f"run_id: {report['run_id']}")
         print(f"dataset: {report['dataset']}")
         for key, value in report["metrics"].items():
@@ -116,6 +157,11 @@ def main() -> None:
         print("membership_recommendations:")
         for recommendation in report["membership_recommendations"]:
             print(f"- {recommendation}")
+    elif args.command == "calibrate":
+        from .calibration import calibrate_from_cli
+        calibrate_from_cli(args)
+    else:
+        parser.print_help()
 
 
 if __name__ == "__main__":

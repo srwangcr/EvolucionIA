@@ -125,7 +125,7 @@ class MinerAgent(Agent):
         return "hold"
 
     def evolve(self, scarcity: float) -> None:
-        self.energy = max(0.0, self.energy - scarcity * 0.2)
+        self.energy = max(0.0, self.energy - scarcity * 0.15)
         self.production_rate = max(1, int(round(self.production_rate / max(0.8, scarcity))))
         self.reproduction_drive = max(0.05, self.reproduction_drive * (1 + (1 - scarcity) * 0.02))
 
@@ -164,15 +164,15 @@ class ConsumerAgent(Agent):
 
     def decide(self, price: float, trend: float) -> Decision:
         price_low = _low_membership(price, self.buy_threshold)
-        stock_low = _low_membership(float(self.inventory), 2.0)
-        energy_low = _low_membership(self.energy, 10.0)
+        stock_low = _low_membership(float(self.inventory), 3.0)  # ← 2.0 → 3.0
+        energy_low = _low_membership(self.energy, 8.0)  # ← 10.0 → 8.0
         buy_score = 0.45 * price_low + 0.35 * stock_low + 0.2 * energy_low
         if buy_score >= 0.42 and self.balance >= price:
             return "buy"
         return "hold"
 
     def evolve(self, scarcity: float) -> None:
-        self.energy = max(0.0, self.energy - scarcity * 0.1)
+        self.energy = max(0.0, self.energy - scarcity * 0.15)
         self.risk_tolerance = max(0.05, self.risk_tolerance * (1 + scarcity * 0.01))
 
 
@@ -211,4 +211,3 @@ def create_agent(
     if species == Species.SPECULATOR:
         return SpeculatorAgent(**payload)
     return ConsumerAgent(**payload)
-

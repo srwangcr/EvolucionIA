@@ -1,23 +1,25 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass 
 from pathlib import Path
 import os
+from typing import Any
 
 
 @dataclass(frozen=True)
 class Settings:
     database_url: str
     read_database_url: str | None = None
-    initial_agents: int = 60
+    initial_agents: int = 200
     ticks: int = 120
-    generation_length: int = 30
+    generation_length: int = 15  # ← 30 → 15 (reproducción más frecuente)
     initial_price: float = 10.0
     seed: int = 42
     resource_name: str = "ore"
     compute_backend: str = "serial"
     compute_workers: int = 2
     output_dir: Path = Path(".")
+    calibration_file: str | None = None
 
 
 def load_settings() -> Settings:
@@ -26,9 +28,9 @@ def load_settings() -> Settings:
     return Settings(
         database_url=os.getenv("DATABASE_URL", "sqlite:///evolucionia_runs.db"),
         read_database_url=read_database_url or None,
-        initial_agents=int(os.getenv("INITIAL_AGENTS", "60")),
+        initial_agents=int(os.getenv("INITIAL_AGENTS", "200")),
         ticks=int(os.getenv("TICKS", "120")),
-        generation_length=int(os.getenv("GENERATION_LENGTH", "30")),
+        generation_length=int(os.getenv("GENERATION_LENGTH", "15")),
         initial_price=float(os.getenv("INITIAL_PRICE", "10.0")),
         seed=int(os.getenv("SIMULATION_SEED", "42")),
         resource_name=os.getenv("RESOURCE_NAME", "ore"),

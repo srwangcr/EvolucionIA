@@ -1,12 +1,71 @@
-.venv/
+# Python
 __pycache__/
-*.pyc
-*.sqlite3
-*.db
-.dist/
-build/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.env
+.venv
+venv/
+ENV/
+env/
 dist/
-.streamlit/
+build/
+*.egg-info/
+*.egg
 .pytest_cache/
 .coverage
-.env
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# SQLite
+*.db
+*.db-shm
+*.db-wal
+*.db.backup
+*.sqlite3
+
+# Rust
+**/_rust/target/
+**/_rust/Cargo.lock
+*.rs.bk
+*.rlib
+*.dylib
+
+# Optuna
+optuna_*.db
+optuna_*.db-shm
+optuna_*.db-wal
+
+# Maturin
+**/_rust/.maturin/
+**/_rust/dist/
+
+# Streamlit
+.streamlit/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Datos
+data/*.csv
+data/*.parquet
+!data/.gitkeep
+
+# Logs
+*.log
+logs/
+
+# Parámetros calibrados
+params/
+!params/.gitkeep
+
+# Temporales
+tmp/
+*.tmp

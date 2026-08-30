@@ -11,6 +11,7 @@ from .database import finalize_run, init_db, new_run_id, save_tick, start_run
 from .genetics import build_child, build_toolbox, rank_children
 from .models import Agent, Species, create_agent
 from .scaling import build_decision_backend
+from .matching import HybridMatcher
 
 
 @dataclass
@@ -36,6 +37,7 @@ class SimulationEngine:
         self.run_id = new_run_id()
         self.toolbox = build_toolbox(settings.seed)
         self.decision_backend = build_decision_backend(settings.compute_backend, settings.compute_workers)
+        self.matcher = HybridMatcher(threshold=50, seed=settings.seed)
 
     def _create_agents(self, count: int) -> list[Agent]:
         species_cycle = [Species.MINER, Species.SPECULATOR, Species.CONSUMER]
@@ -43,15 +45,15 @@ class SimulationEngine:
         for agent_id in range(1, count + 1):
             species = species_cycle[(agent_id - 1) % len(species_cycle)]
             if species == Species.MINER:
-                balance, inventory, energy = 45.0, 2, 12.0
-                buy_threshold, sell_threshold, production_rate = 9.5, 14.0, 2
+                balance, inventory, energy = 100.0, 10, 15.0
+                buy_threshold, sell_threshold, production_rate = 9.5, 14.0, 3
                 risk_tolerance, momentum_bias, reproduction_drive = 0.35, 0.55, 0.85
             elif species == Species.SPECULATOR:
-                balance, inventory, energy = 60.0, 1, 10.0
+                balance, inventory, energy = 150.0, 5, 12.0
                 buy_threshold, sell_threshold, production_rate = 8.5, 13.5, 1
                 risk_tolerance, momentum_bias, reproduction_drive = 0.8, 0.9, 0.55
             else:
-                balance, inventory, energy = 35.0, 0, 14.0
+                balance, inventory, energy = 80.0, 3, 18.0
                 buy_threshold, sell_threshold, production_rate = 10.5, 15.5, 1
                 risk_tolerance, momentum_bias, reproduction_drive = 0.2, 0.35, 0.45
             agents.append(
@@ -72,11 +74,11 @@ class SimulationEngine:
         return agents
 
     def _macro_shock(self, tick: int) -> float:
-        if tick % 40 == 0 and tick > 0:
+        if tick % 15 == 0 and tick > 0:
             return 1.25
-        if tick % 27 == 0 and tick > 0:
+        if tick % 10 == 0 and tick > 0:
             return 0.88
-        if tick % 19 == 0 and tick > 0:
+        if tick % 7 == 0 and tick > 0:
             return 1.08
         return 1.0
 
@@ -92,12 +94,12 @@ class SimulationEngine:
                 agent.energy = max(0.0, agent.energy - 1.25 * scarcity)
             elif agent.species == Species.CONSUMER:
                 if agent.inventory > 0:
-                    agent.inventory -= 1
-                    agent.energy = min(20.0, agent.energy + 2.5)
+                    agent.inventory -= 2  # ← Consumen 2 unidades
+                    agent.energy = min(20.0, agent.energy + 3.0)
                 else:
-                    agent.energy = max(0.0, agent.energy - 2.0 * scarcity)
+                    agent.energy = max(0.0, agent.energy - 3.0 * scarcity)
             else:
-                agent.energy = max(0.0, agent.energy - 0.6 * scarcity)
+                agent.energy = max(0.0, agent.energy - 0.8 * scarcity)
 
             if agent.energy <= 0 and agent.species != Species.SPECULATOR and agent.inventory <= 0:
                 agent.alive = False
@@ -117,60 +119,41 @@ class SimulationEngine:
                 buyers.append(agent)
             if decision in ("sell", "both"):
                 sellers.append(agent)
-
         return buyers, sellers
 
-    def _pick_counterparty(self, source: Agent, candidates: list[Agent]) -> Agent | None:
-        viable = [agent for agent in candidates if agent.agent_id != source.agent_id]
-        if not viable:
-            return None
-        return self.rng.choice(viable)
-
     def _execute_market(self, price: float, buyers: list[Agent], sellers: list[Agent]) -> list[dict]:
-        transactions: list[dict] = []
-        buyer_pool = buyers[:]
-        seller_pool = sellers[:]
-        self.rng.shuffle(buyer_pool)
-        self.rng.shuffle(seller_pool)
+        """Ejecuta matching usando Polars (vectorizado) o Python (fallback)."""
+        if not buyers or not sellers:
+            return []
 
-        for buyer in buyer_pool:
-            seller = self._pick_counterparty(buyer, seller_pool)
-            if seller is None:
-                continue
-            if buyer.balance < price or seller.inventory <= 0:
-                continue
+        result = self.matcher.match(buyers, sellers, price, max_quantity=1)
 
-            buyer.balance -= price
-            buyer.inventory += 1
-            seller.balance += price
-            seller.inventory -= 1
-            transactions.append(
-                {
-                    "buyer_id": buyer.agent_id,
-                    "seller_id": seller.agent_id,
-                    "resource": self.settings.resource_name,
-                    "price": round(price, 4),
-                    "quantity": 1,
-                }
-            )
+        if len(buyers) > self.matcher.threshold or len(sellers) > self.matcher.threshold:
+            self._apply_transactions(result.transactions)
 
-            if seller.inventory <= 0:
-                seller_pool = [agent for agent in seller_pool if agent.agent_id != seller.agent_id]
-            if buyer.balance < price:
-                buyer_pool = [agent for agent in buyer_pool if agent.agent_id != buyer.agent_id]
+        return result.transactions
 
-        return transactions
+    def _apply_transactions(self, transactions: list[dict]) -> None:
+        agent_map = {a.agent_id: a for a in self.agents}
+        for tx in transactions:
+            buyer = agent_map.get(tx["buyer_id"])
+            seller = agent_map.get(tx["seller_id"])
+            if buyer and seller:
+                buyer.balance -= tx["price"]
+                buyer.inventory += tx["quantity"]
+                seller.balance += tx["price"]
+                seller.inventory -= tx["quantity"]
 
     def _price_update(self, base_price: float, buyers: list[Agent], sellers: list[Agent], shock: float) -> float:
         pressure = len(buyers) - len(sellers)
         alive_count = max(1, len(self._alive_agents()))
-        swing = 0.04 * pressure / alive_count
+        swing = 0.08 * pressure / alive_count  # ← 0.04 → 0.08
         updated = base_price * (1 + swing) * shock
         return max(0.75, min(250.0, updated))
 
     def _select_elite(self, alive_agents: list[Agent]) -> list[Agent]:
         ranked = sorted(alive_agents, key=lambda agent: agent.wealth(self.price), reverse=True)
-        elite_count = max(4, len(ranked) // 3)
+        elite_count = max(6, len(ranked) // 3)
         return [agent for agent in ranked[:elite_count] if agent.wealth(self.price) >= 85.0]
 
     def _maybe_reproduce(self) -> None:
@@ -186,7 +169,7 @@ class SimulationEngine:
         if not pairings:
             return
 
-        target_children = max(1, min(6, int(round(sum(agent.reproduction_drive for agent in elite) / len(elite)))))
+        target_children = max(2, min(8, int(round(sum(agent.reproduction_drive for agent in elite) / len(elite)))))
         children: list[Agent] = []
 
         for index in range(target_children):
@@ -277,7 +260,7 @@ class SimulationEngine:
                     )
                 )
                 save_tick(self.session, self.run_id, tick, market_row, transactions, self._agent_rows())
-                self.session.commit()
+
                 last_close = previous_close
                 previous_close = close_price
 

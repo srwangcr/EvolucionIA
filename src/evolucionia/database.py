@@ -5,7 +5,7 @@ from typing import Iterable
 from uuid import uuid4
 
 import pandas as pd
-from sqlalchemy import Boolean, DateTime, Float, Index, Integer, String, create_engine, select, update
+from sqlalchemy import Boolean, DateTime, Float, Index, Integer, String, create_engine, select, update, event
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 
 
@@ -96,9 +96,46 @@ class MarketSnapshotRow(Base):
 
 
 def build_engine(database_url: str):
+    """Crea el motor de base de datos con optimizaciones para SQLite."""
     kwargs = {"future": True, "pool_pre_ping": True}
+    
     if database_url.startswith("sqlite"):
-        kwargs["connect_args"] = {"check_same_thread": False}
+        # Configuración para SQLite
+        kwargs["connect_args"] = {
+            "check_same_thread": False,
+        }
+        
+        # Crear el motor
+        engine = create_engine(database_url, **kwargs)
+        
+        # ⬇️ CONFIGURAR PRAGMAs para máxima velocidad
+        @event.listens_for(engine, "connect")
+        def set_sqlite_pragmas(dbapi_connection, connection_record):
+            cursor = dbapi_connection.cursor()
+            
+            # WAL mode = escritura más rápida (permite lecturas durante escrituras)
+            cursor.execute("PRAGMA journal_mode=WAL")
+            
+            # Sincronización reducida = más rápido (NORMAL es seguro)
+            cursor.execute("PRAGMA synchronous=NORMAL")
+            
+            # Cache más grande = menos lecturas de disco
+            cursor.execute("PRAGMA cache_size=10000")
+            
+            # Temp store en memoria = más rápido para operaciones temporales
+            cursor.execute("PRAGMA temp_store=MEMORY")
+            
+            # Aumentar límite de páginas en cache
+            cursor.execute("PRAGMA cache_size=-20000")  # 20MB de cache
+            
+            # Usar mmap para archivos grandes
+            cursor.execute("PRAGMA mmap_size=30000000000")  # 30GB
+            
+            cursor.close()
+        
+        return engine
+    
+    # Para PostgreSQL u otras bases de datos
     return create_engine(database_url, **kwargs)
 
 
