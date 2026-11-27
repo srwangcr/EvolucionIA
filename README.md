@@ -197,3 +197,14 @@ PyO3 - Rust-Python bindings
 Streamlit - Dashboard interactivo
 
 Optuna - Optimización de hiperparámetros
+## 📋 Hoja de ruta de madurez tecnológica (TRL 4 -> TRL 9)
+
+Estado actual: **TRL 4** (motores híbridos Python/Polars M2 y Rust/PyO3 M3, evolución genética DEAP, calibración Optuna y dashboard Streamlit validados en benchmarks de 120 ticks).
+
+- [x] **TRL 4 — Validación de componentes en laboratorio:** Matching vectorizado en Polars (M2), hot-path nativo sin GIL en Rust/PyO3 (M3), evolución genética con DEAP, persistencia SQLite WAL y dashboard OHLC en Streamlit.
+- [ ] **TRL 5 — Validación en entorno relevante y expansión de agentes:** Incorporar nuevas especies heterogéneas (market makers, arbitrajistas, reguladores), shocks macroeconómicos configurables y exportación nativa a Parquet/Arrow.
+- [ ] **TRL 6 — Prototipo calibrado con datos empíricos de mercado:** Calibración automatizada con Optuna sobre series históricas reales (order books / OHLCV) validando hechos estilizados (*stylized facts*: colas pesadas, clustering de volatilidad).
+- [ ] **TRL 7 — Ejecución distribuida y API remota:** Exponer motor Rust M3 mediante API REST/gRPC asíncrona con cola de trabajos para correr simulaciones masivas (10,000+ agentes / 1,000+ ticks) en servidor Linux.
+- [ ] **TRL 8 — Sistema calificado y reproducible:** Congelar semillas deterministas en Rust, suite de regresión estadística automatizada y empaquetado de contenedores listos para clústeres de cómputo.
+- [ ] **TRL 9 — Operación nominal en investigación / producción:** Uso continuo como banco de pruebas para investigación económica computacional, stress-testing de liquidez o entrenamiento de agentes RL.
+
